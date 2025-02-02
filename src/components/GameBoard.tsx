@@ -84,7 +84,17 @@ const GameBoard = ({ width, height, snakeCount, gameSpeed }: GameBoardProps) => 
       
       newSnakes.push({
         id: i,
-        body: [position],
+        body: [
+          position,
+          { 
+            x: position.x - validDirections[0].x, 
+            y: position.y - validDirections[0].y 
+          },
+          { 
+            x: position.x - validDirections[0].x * 2, 
+            y: position.y - validDirections[0].y * 2 
+          }
+        ],
         direction: validDirections.length > 0 
           ? validDirections[Math.floor(Math.random() * validDirections.length)]
           : DIRECTIONS[0],

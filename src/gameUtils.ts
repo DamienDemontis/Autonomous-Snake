@@ -19,7 +19,9 @@ export const moveSnake = (snake: Snake, direction: Position, width: number, heig
 
   return {
     ...snake,
-    body: [newHead, ...snake.body.slice(0, -1)],
+    body: snake.body.length < 3 
+      ? [newHead, ...snake.body] // Grow until 3 segments
+      : [newHead, ...snake.body.slice(0, -1)], // Normal movement
     direction,
   };
 };
