@@ -48,6 +48,54 @@ export const findNearestFruit = (head: Position, fruits: Position[]): Position |
   });
 };
 
+const posKey = (pos: Position) => `${pos.x},${pos.y}`;
+
+function findPath(
+  start: Position,
+  goal: Position,
+  width: number,
+  height: number,
+  obstacles: Set<string>
+): Position[] | null {
+  const heuristic = (a: Position, b: Position) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+  const openSet: Position[] = [start];
+  const cameFrom: { [key: string]: Position } = {};
+  const gScore: { [key: string]: number } = { [posKey(start)]: 0 };
+  const fScore: { [key: string]: number } = { [posKey(start)]: heuristic(start, goal) };
+
+  while (openSet.length > 0) {
+    let current = openSet.reduce((min, pos) => fScore[posKey(pos)] < fScore[posKey(min)] ? pos : min, openSet[0]);
+    
+    if (current.x === goal.x && current.y === goal.y) {
+      const path = [current];
+      while (cameFrom[posKey(current)]) {
+        current = cameFrom[posKey(current)];
+        path.unshift(current);
+      }
+      return path;
+    }
+
+    openSet.splice(openSet.indexOf(current), 1);
+    
+    for (const dir of DIRECTIONS) {
+      const neighbor = { x: current.x + dir.x, y: current.y + dir.y };
+      if (neighbor.x < 0 || neighbor.x >= width || neighbor.y < 0 || neighbor.y >= height) continue;
+      if (obstacles.has(posKey(neighbor))) continue;
+
+      const tentativeGScore = gScore[posKey(current)] + 1;
+      if (tentativeGScore < (gScore[posKey(neighbor)] ?? Infinity)) {
+        cameFrom[posKey(neighbor)] = current;
+        gScore[posKey(neighbor)] = tentativeGScore;
+        fScore[posKey(neighbor)] = tentativeGScore + heuristic(neighbor, goal);
+        if (!openSet.some(p => p.x === neighbor.x && p.y === neighbor.y)) {
+          openSet.push(neighbor);
+        }
+      }
+    }
+  }
+  return null;
+}
+
 export const calculateBestDirection = (
   head: Position,
   target: Position | null,
@@ -55,62 +103,55 @@ export const calculateBestDirection = (
   height: number,
   snakes: Snake[]
 ): Position => {
-  // Get all snake body segments
-  const allSegments = snakes.flatMap(s => s.body);
+  const obstacles = new Set<string>();
+  const currentSnake = snakes.find(s => s.body[0].x === head.x && s.body[0].y === head.y);
   
-  const possibleMoves = DIRECTIONS.map(dir => ({
-    dir,
-    pos: { x: head.x + dir.x, y: head.y + dir.y }
-  }));
-
-  const validMoves = possibleMoves.filter(move => 
-    move.pos.x >= 0 && move.pos.x < width &&
-    move.pos.y >= 0 && move.pos.y < height
-  );
-
-  const scoredMoves = validMoves.map(move => {
-    let riskScore = 0;
-    
-    // Immediate collision check
-    const willCollide = allSegments.some(segment => 
-      segment.x === move.pos.x && segment.y === move.pos.y
-    );
-    
-    // Nearby snake detection (3x3 area)
-    const nearbyDanger = allSegments.some(segment =>
-      Math.abs(segment.x - move.pos.x) <= 1 &&
-      Math.abs(segment.y - move.pos.y) <= 1
-    );
-
-    // Future path prediction
-    const futurePosition = {
-      x: move.pos.x + move.dir.x,
-      y: move.pos.y + move.dir.y
-    };
-    
-    const futureDanger = allSegments.some(segment =>
-      segment.x === futurePosition.x && 
-      segment.y === futurePosition.y
-    );
-
-    riskScore += willCollide ? 1000 : 0;
-    riskScore += nearbyDanger ? 50 : 0;
-    riskScore += futureDanger ? 30 : 0;
-
-    const targetDist = target ? 
-      Math.hypot(target.x - move.pos.x, target.y - move.pos.y) : 0;
-
-    return { 
-      move, 
-      score: targetDist + riskScore,
-      priority: target ? 1 : 0 
-    };
+  // Collect all obstacles (other snake bodies and self body except head)
+  snakes.forEach(snake => {
+    snake.body.forEach((segment, index) => {
+      if (snake === currentSnake && index === 0) return;
+      obstacles.add(posKey(segment));
+    });
   });
 
-  // Find safest move with lowest score
-  return scoredMoves.reduce((best, current) => 
-    current.score < best.score ? current : best
-  ).move.dir;
+  // Try to find path to fruit first
+  if (target) {
+    const path = findPath(head, target, width, height, obstacles);
+    if (path && path.length > 1) {
+      const nextStep = path[1];
+      return DIRECTIONS.find(d => 
+        d.x === (nextStep.x - head.x) && 
+        d.y === (nextStep.y - head.y)
+      ) || DIRECTIONS[0];
+    }
+  }
+
+  // Fallback to safe move selection
+  const safeMoves = DIRECTIONS.filter(dir => {
+    const newPos = { x: head.x + dir.x, y: head.y + dir.y };
+    return newPos.x >= 0 && newPos.x < width &&
+           newPos.y >= 0 && newPos.y < height &&
+           !obstacles.has(posKey(newPos));
+  });
+
+  if (safeMoves.length > 0) {
+    // Prefer moves with most open space
+    const scoredMoves = safeMoves.map(dir => {
+      const pos = { x: head.x + dir.x, y: head.y + dir.y };
+      const openSpace = DIRECTIONS.filter(d => {
+        const check = { x: pos.x + d.x, y: pos.y + d.y };
+        return check.x >= 0 && check.x < width &&
+               check.y >= 0 && check.y < height &&
+               !obstacles.has(posKey(check));
+      }).length;
+      return { dir, score: openSpace + Math.random() };
+    });
+    
+    return scoredMoves.reduce((best, curr) => curr.score > best.score ? curr : best).dir;
+  }
+
+  // No safe moves, try to reverse as last resort
+  return currentSnake?.direction || DIRECTIONS[0];
 };
 
 const collisionGrid = new Map<string, boolean>();
