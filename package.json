@@ -1,7 +1,7 @@
 {
   "name": "snake-game",
   "version": "1.0.0",
-  "homepage": "https://DamienDemontis.github.io/Autonomous-Snake",
+  "homepage": "https://damiendemontis.github.io/Autonomous-Snake/",
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",

@@ -16,6 +16,26 @@ const MainMenu = ({ onStart }: { onStart: (config: GameConfig) => void }) => {
     onStart(config);
   };
 
+  // Adjust cell size based on screen size
+  React.useEffect(() => {
+    const updateCellSize = () => {
+      const width = window.innerWidth;
+      let newCellSize = CELL_SIZE;
+      
+      if (width <= 480) { // Mobile phones
+        newCellSize = 15;
+      } else if (width <= 768) { // Tablets
+        newCellSize = 18;
+      }
+      
+      setConfig(c => ({ ...c, cellSize: newCellSize }));
+    };
+
+    updateCellSize();
+    window.addEventListener('resize', updateCellSize);
+    return () => window.removeEventListener('resize', updateCellSize);
+  }, []);
+
   return (
     <Router>
       <Routes>
@@ -33,29 +53,18 @@ const MainMenu = ({ onStart }: { onStart: (config: GameConfig) => void }) => {
                     <CyberSlider
                       label="Grid Size"
                       min={10}
-                      max={50}
+                      max={window.innerWidth <= 480 ? 30 : 50}
                       value={config.gridSize}
                       onChange={(v: number) => setConfig(c => ({ ...c, gridSize: v }))}
                     />
                   </div>
 
                   <div className="input-group">
-                    <span className="input-prefix">config.cell_size</span>
-                    <CyberSlider
-                      label="Cell Size"
-                      min={10}
-                      max={50}
-                      value={config.cellSize || CELL_SIZE}
-                      onChange={(v: number) => setConfig(c => ({ ...c, cellSize: v }))}
-                    />
-                  </div>
-                  
-                  <div className="input-group">
                     <span className="input-prefix">config.snake_count</span>
                     <CyberSlider
                       label="Snake Count"
                       min={1}
-                      max={10}
+                      max={window.innerWidth <= 480 ? 6 : 10}
                       value={config.snakeCount}
                       onChange={(v: number) => setConfig(c => ({ ...c, snakeCount: v }))}
                     />
