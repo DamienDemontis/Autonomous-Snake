@@ -19,6 +19,7 @@ export interface GameConfig {
   gridSize: number;
   snakeCount: number;
   gameSpeed: number;
+  cellSize?: number;
 }
 
 export interface PowerUp {

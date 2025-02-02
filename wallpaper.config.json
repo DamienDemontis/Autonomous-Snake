@@ -1,0 +1,22 @@
+{
+  "title": "CyberSnake Arena",
+  "file": "index.html",
+  "type": "web",
+  "preview": "preview.jpg",
+  "properties": {
+    "cellSize": {
+      "type": "slider",
+      "label": "Cell Size",
+      "min": 10,
+      "max": 100,
+      "default": 30
+    },
+    "snakeCount": {
+      "type": "slider",
+      "label": "Snake Count",
+      "min": 1,
+      "max": 20,
+      "default": 5
+    }
+  }
+} 
