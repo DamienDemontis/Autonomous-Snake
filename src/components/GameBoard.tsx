@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useState, useReducer } from 'react';
+import React, { useRef, useEffect, useCallback, useState, useReducer, useMemo } from 'react';
 import { Position, Snake, PowerUp, GameState } from '../types';
 import { CELL_SIZE, CYBER_COLORS, DIRECTIONS, POWERUP_COLORS, POWERUP_DURATION } from '../constants';
 import { getRandomPosition, moveSnake, checkCollisions, findNearestFruit, calculateBestDirection, checkCollision } from '../gameUtils';
@@ -6,10 +6,9 @@ import { generateUniqueColors } from '../constants';
 import { gameReducer } from '../gameReducer';
 
 interface GameBoardProps {
-  width: number;
-  height: number;
   snakeCount: number;
   gameSpeed: number;
+  cellSize?: number;  // New prop for configurable cell size
 }
 
 const initialState: GameState = {
@@ -20,36 +19,132 @@ const initialState: GameState = {
   height: 0
 };
 
-const GameBoard = ({ width, height, snakeCount, gameSpeed }: GameBoardProps) => {
+const GameBoard = ({ snakeCount, gameSpeed, cellSize = CELL_SIZE }: GameBoardProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [gameState, dispatch] = useReducer(gameReducer, {
     ...initialState,
-    width,
-    height
+    width: 0,
+    height: 0
   });
   const [scores, setScores] = useState<{ [key: number]: number }>({});
   const [gameOver, setGameOver] = useState(false);
   const [powerUps, setPowerUps] = useState<PowerUp[]>([]);
   const lastUpdate = useRef<number>(0);
   const frameCount = useRef(0);
+  const animationFrameId = useRef<number | undefined>(undefined);
+  const lastFrameTime = useRef<number>(0);
+  const FPS = 60; // Target FPS for rendering
+  const frameInterval = 1000 / FPS;
+  const BASE_TPS = 5; // Increased base ticks per second (was 2)
+  // Exponential scaling for more dynamic speed range
+  const tickInterval = 1000 / (BASE_TPS * Math.pow(1.2, gameSpeed - 1));
 
   const MAX_POWERUPS = 5;
 
   // Increase minimum distance between snakes
   const MIN_DISTANCE = 8;
 
-  // Initialize game state
+  // Add these refs at the top with other refs
+  const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const backgroundImageRef = useRef<ImageData | null>(null);
+
+  // Replace the grid lines useMemo with this optimized version
+  const initializeBackground = useCallback(() => {
+    if (!dimensions.width || !dimensions.height) return;
+    
+    // Create offscreen canvas if it doesn't exist
+    if (!offscreenCanvasRef.current) {
+      offscreenCanvasRef.current = document.createElement('canvas');
+    }
+    
+    const offscreenCanvas = offscreenCanvasRef.current;
+    offscreenCanvas.width = window.innerWidth;
+    offscreenCanvas.height = window.innerHeight;
+    const ctx = offscreenCanvas.getContext('2d')!;
+    
+    // Draw background
+    ctx.fillStyle = '#0a0a12';
+    ctx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+    
+    // Draw grid lines
+    ctx.strokeStyle = '#1a1a2f';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    
+    // Vertical lines
+    for (let i = 0; i <= dimensions.width; i++) {
+      const x = i * cellSize;
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, offscreenCanvas.height);
+    }
+    
+    // Horizontal lines
+    for (let i = 0; i <= dimensions.height; i++) {
+      const y = i * cellSize;
+      ctx.moveTo(0, y);
+      ctx.lineTo(offscreenCanvas.width, y);
+    }
+    
+    ctx.stroke();
+    
+    // Store the background image
+    backgroundImageRef.current = ctx.getImageData(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+  }, [dimensions.width, dimensions.height, cellSize]);
+
+  // Call initializeBackground when dimensions change
+  useEffect(() => {
+    initializeBackground();
+  }, [initializeBackground]);
+
+  // Replace the drawBackground function with this optimized version
+  const drawBackground = useCallback((ctx: CanvasRenderingContext2D) => {
+    if (backgroundImageRef.current) {
+      ctx.putImageData(backgroundImageRef.current, 0, 0);
+    }
+  }, []);
+
+  // Add resize handler
+  useEffect(() => {
+    const handleResize = () => {
+      if (!containerRef.current) return;
+      
+      const container = containerRef.current;
+      const width = Math.floor(window.innerWidth / cellSize);
+      const height = Math.floor(window.innerHeight / cellSize);
+      
+      setDimensions({ width, height });
+      
+      if (canvasRef.current) {
+        canvasRef.current.width = window.innerWidth;
+        canvasRef.current.height = window.innerHeight;
+      }
+
+      // Update game state with new dimensions
+      dispatch({
+        type: 'UPDATE_DIMENSIONS',
+        payload: { width, height }
+      });
+    };
+
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [cellSize]);
+
+  // Modify the initialization effect
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     
     const ctx = canvas.getContext('2d');
-    canvas.width = width * CELL_SIZE;
-    canvas.height = height * CELL_SIZE;
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
 
     // Initialize snakes with unique colors
     const colors = generateUniqueColors(snakeCount);
-    const newSnakes = [];
+    const newSnakes: Snake[] = [];
     const occupiedPositions: Position[] = [];
 
     for (let i = 0; i < snakeCount; i++) {
@@ -58,14 +153,14 @@ const GameBoard = ({ width, height, snakeCount, gameSpeed }: GameBoardProps) => 
       let attempts = 0;
       
       do {
-        position = getRandomPosition(width, height);
+        position = getRandomPosition(dimensions.width, dimensions.height, gameState.snakes);
         isValidPosition = 
           position.x >= MIN_DISTANCE && 
-          position.x < width - MIN_DISTANCE &&
+          position.x < dimensions.width - MIN_DISTANCE &&
           position.y >= MIN_DISTANCE && 
-          position.y < height - MIN_DISTANCE &&
+          position.y < dimensions.height - MIN_DISTANCE &&
           !occupiedPositions.some(pos => 
-            Math.abs(pos.x - position.x) <= 4 &&  // Increased from 2
+            Math.abs(pos.x - position.x) <= 4 &&
             Math.abs(pos.y - position.y) <= 4
           );
         attempts++;
@@ -75,29 +170,34 @@ const GameBoard = ({ width, height, snakeCount, gameSpeed }: GameBoardProps) => 
       const validDirections = DIRECTIONS.filter(dir => {
         const newX = position.x + dir.x;
         const newY = position.y + dir.y;
-        const isValid = newX >= 0 && newX < width && newY >= 0 && newY < height;
+        const isValid = newX >= 0 && newX < dimensions.width && newY >= 0 && newY < dimensions.height;
         console.log(`Snake ${i} direction ${dir.x},${dir.y} valid:`, isValid);
         return isValid;
       });
 
+      if (validDirections.length === 0) {
+        console.log(`No valid directions found for snake ${i}, retrying position`);
+        continue; // Try a new position
+      }
+
       occupiedPositions.push(position);
+      
+      const initialDirection = validDirections[Math.floor(Math.random() * validDirections.length)];
       
       newSnakes.push({
         id: i,
         body: [
           position,
           { 
-            x: position.x - validDirections[0].x, 
-            y: position.y - validDirections[0].y 
+            x: position.x - initialDirection.x, 
+            y: position.y - initialDirection.y 
           },
           { 
-            x: position.x - validDirections[0].x * 2, 
-            y: position.y - validDirections[0].y * 2 
+            x: position.x - initialDirection.x * 2, 
+            y: position.y - initialDirection.y * 2 
           }
         ],
-        direction: validDirections.length > 0 
-          ? validDirections[Math.floor(Math.random() * validDirections.length)]
-          : DIRECTIONS[0],
+        direction: initialDirection,
         color: colors[i],
         score: 0,
         alive: true,
@@ -107,18 +207,40 @@ const GameBoard = ({ width, height, snakeCount, gameSpeed }: GameBoardProps) => 
       });
 
       console.log(`Snake ${i} initialized at`, position, 
-        'with direction', validDirections[0], 
+        'with direction', initialDirection, 
         'valid directions:', validDirections);
     }
     
+    if (newSnakes.length === 0) {
+      console.error('Failed to initialize any snakes with valid positions');
+      // Initialize at least one snake in the center
+      const centerX = Math.floor(dimensions.width / 2);
+      const centerY = Math.floor(dimensions.height / 2);
+      newSnakes.push({
+        id: 0,
+        body: [
+          { x: centerX, y: centerY },
+          { x: centerX - 1, y: centerY },
+          { x: centerX - 2, y: centerY }
+        ],
+        direction: DIRECTIONS[0],
+        color: colors[0],
+        score: 0,
+        alive: true,
+        powerUps: [],
+        speedMultiplier: 1,
+        invulnerable: false
+      });
+    }
+
     dispatch({ type: 'INIT_SNAKES', payload: newSnakes });
     dispatch({ 
       type: 'UPDATE_FRUITS', 
       payload: Array.from({ length: 3 }, () => 
-        getRandomPosition(width, height)
+        getRandomPosition(dimensions.width, dimensions.height, newSnakes)
       ) 
     });
-  }, []);
+  }, [dimensions]);
 
   // Move these functions BEFORE the gameLoop declaration
   const checkFruitConsumption = () => {
@@ -134,7 +256,7 @@ const GameBoard = ({ width, height, snakeCount, gameSpeed }: GameBoardProps) => 
     if (Math.random() < 0.02) {
       const types = Object.keys(POWERUP_COLORS) as PowerUp['type'][];
       const newPowerUp = {
-        position: getRandomPosition(width, height),
+        position: getRandomPosition(dimensions.width, dimensions.height, gameState.snakes),
         type: types[Math.floor(Math.random() * types.length)],
         active: false,
         duration: POWERUP_DURATION
@@ -147,124 +269,178 @@ const GameBoard = ({ width, height, snakeCount, gameSpeed }: GameBoardProps) => 
     dispatch({ type: 'CHECK_COLLISIONS' });
   };
 
-  // Then declare gameLoop AFTER these functions
-  const gameLoop = useCallback(() => {
-    frameCount.current++;
-    const now = Date.now();
-    if (now - lastUpdate.current > 1000 / gameSpeed) {
-      dispatch({ type: 'MOVE_SNAKES' });
-      checkCollisions();
-      checkFruitConsumption();
-      checkPowerUps();
-      spawnPowerUps();
-      lastUpdate.current = now;
-    }
-  }, [gameSpeed, checkCollisions, checkFruitConsumption, checkPowerUps, spawnPowerUps]);
+  // Optimized draw functions
+  const drawFruits = useCallback((ctx: CanvasRenderingContext2D, fruits: Position[]) => {
+    ctx.fillStyle = '#ff4757';
+    ctx.beginPath();
+    
+    fruits.forEach(fruit => {
+      ctx.moveTo(fruit.x * cellSize + cellSize/2, fruit.y * cellSize + cellSize/2);
+      ctx.arc(
+        fruit.x * cellSize + cellSize/2,
+        fruit.y * cellSize + cellSize/2,
+        cellSize/2, 0, Math.PI * 2
+      );
+    });
+    
+    ctx.fill();
+  }, [cellSize]);
 
-  // Optimized draw function
-  const draw = useCallback(() => {
+  const drawSnakes = useCallback((ctx: CanvasRenderingContext2D, snakes: Snake[]) => {
+    ctx.shadowBlur = 10;
+    
+    snakes.forEach(snake => {
+      if (!snake.alive) return;
+      
+      ctx.fillStyle = snake.color;
+      ctx.shadowColor = snake.color;
+      
+      // Batch draw snake segments
+      ctx.beginPath();
+      snake.body.forEach(segment => {
+        ctx.rect(
+          segment.x * cellSize,
+          segment.y * cellSize,
+          cellSize,
+          cellSize
+        );
+      });
+      ctx.fill();
+    });
+    
+    // Reset shadow for better performance
+    ctx.shadowBlur = 0;
+  }, [cellSize]);
+
+  const drawPowerUps = useCallback((ctx: CanvasRenderingContext2D, powerUps: PowerUp[]) => {
+    powerUps.forEach(powerUp => {
+      ctx.fillStyle = POWERUP_COLORS[powerUp.type];
+      ctx.shadowColor = POWERUP_COLORS[powerUp.type];
+      ctx.shadowBlur = 15;
+      ctx.beginPath();
+      ctx.arc(
+        powerUp.position.x * cellSize + cellSize/2,
+        powerUp.position.y * cellSize + cellSize/2,
+        cellSize/2, 0, Math.PI * 2
+      );
+      ctx.fill();
+    });
+    
+    // Reset shadow
+    ctx.shadowBlur = 0;
+  }, [cellSize]);
+
+  // Optimize the draw function
+  const draw = useCallback((timestamp: number) => {
     const ctx = canvasRef.current?.getContext('2d');
     if (!ctx) return;
 
-    // Batch draw operations
-    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-    
-    // Draw all elements in single layers
-    drawBackground(ctx);
-    drawFruits(ctx, gameState.fruits);
-    drawSnakes(ctx, gameState.snakes);
-    drawPowerUps(ctx, gameState.powerUps);
-  }, [gameState]);
+    // Calculate elapsed time
+    const elapsed = timestamp - lastFrameTime.current;
 
-  const spawnFruits = () => {
-    dispatch({
-      type: 'UPDATE_FRUITS',
-      payload: Array.from({ length: 3 }, () => 
-        getRandomPosition(width, height)
-      )
-    });
-  };
-
-  useEffect(() => {
-    const animate = () => {
-      draw();
-      requestAnimationFrame(animate);
-    };
-    animate();
-  }, [draw]);
-
-  // Add these drawing functions inside the component
-  const drawBackground = (ctx: CanvasRenderingContext2D) => {
-    ctx.fillStyle = '#0a0a12';
-    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-    
-    // Draw grid lines
-    ctx.strokeStyle = '#1a1a2f';
-    ctx.lineWidth = 0.5;
-    for (let i = 0; i <= width; i++) {
-      ctx.beginPath();
-      ctx.moveTo(i * CELL_SIZE, 0);
-      ctx.lineTo(i * CELL_SIZE, ctx.canvas.height);
-      ctx.stroke();
-    }
-  };
-
-  const drawFruits = (ctx: CanvasRenderingContext2D, fruits: Position[]) => {
-    fruits.forEach(fruit => {
-      ctx.fillStyle = '#ff4757';
-      ctx.beginPath();
-      ctx.arc(
-        fruit.x * CELL_SIZE + CELL_SIZE/2,
-        fruit.y * CELL_SIZE + CELL_SIZE/2,
-        CELL_SIZE/2, 0, Math.PI * 2
-      );
-      ctx.fill();
-    });
-  };
-
-  const drawSnakes = (ctx: CanvasRenderingContext2D, snakes: Snake[]) => {
-    snakes.forEach(snake => {
-      if (!snake.alive) return;
-      snake.body.forEach(segment => {
+    // Only draw if enough time has passed
+    if (elapsed >= frameInterval) {
+      // Clear with background
+      drawBackground(ctx);
+      
+      // Draw game elements with batching
+      ctx.save(); // Save context state once
+      
+      // Draw fruits
+      drawFruits(ctx, gameState.fruits);
+      
+      // Draw snakes with optimized shadow
+      ctx.shadowBlur = 10;
+      gameState.snakes.forEach(snake => {
+        if (!snake.alive) return;
+        
         ctx.fillStyle = snake.color;
         ctx.shadowColor = snake.color;
-        ctx.shadowBlur = 10;
-        ctx.fillRect(segment.x * CELL_SIZE, segment.y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+        ctx.beginPath();
+        
+        snake.body.forEach(segment => {
+          ctx.rect(
+            segment.x * cellSize,
+            segment.y * cellSize,
+            cellSize,
+            cellSize
+          );
+        });
+        ctx.fill();
       });
-    });
-  };
-
-  const drawPowerUps = (ctx: CanvasRenderingContext2D, powerUps: PowerUp[]) => {
-    powerUps.forEach(powerUp => {
-      ctx.fillStyle = POWERUP_COLORS[powerUp.type];
-      ctx.beginPath();
-      ctx.arc(
-        powerUp.position.x * CELL_SIZE + CELL_SIZE/2,
-        powerUp.position.y * CELL_SIZE + CELL_SIZE/2,
-        CELL_SIZE/2, 0, Math.PI * 2
-      );
-      ctx.fill();
-      ctx.shadowColor = POWERUP_COLORS[powerUp.type];
+      
+      // Draw power-ups with optimized shadow
       ctx.shadowBlur = 15;
-    });
-  };
+      gameState.powerUps.forEach(powerUp => {
+        ctx.fillStyle = POWERUP_COLORS[powerUp.type];
+        ctx.shadowColor = POWERUP_COLORS[powerUp.type];
+        ctx.beginPath();
+        ctx.arc(
+          powerUp.position.x * cellSize + cellSize/2,
+          powerUp.position.y * cellSize + cellSize/2,
+          cellSize/2, 0, Math.PI * 2
+        );
+        ctx.fill();
+      });
+      
+      ctx.restore(); // Restore context state once
+      
+      lastFrameTime.current = timestamp;
+    }
+  }, [gameState, drawBackground, drawFruits, drawSnakes, drawPowerUps]);
 
-  // Add to checkCollisions effect
-  console.log(`Frame ${frameCount.current} - Alive snakes:`, 
-    gameState.snakes.filter(s => s.alive).map(s => s.id));
-
-  // Add this useEffect to start the game loop
+  // Implement separate game loop and render loop
   useEffect(() => {
-    const loop = () => {
-      gameLoop();
-      requestAnimationFrame(loop);
+    let lastRenderTime = 0;
+    let lastTickTime = 0;
+    let gameTickTimeout: NodeJS.Timeout | null = null;
+    
+    // Separate game logic tick function
+    const gameTick = () => {
+      const now = Date.now();
+      
+      // Game logic updates
+      dispatch({ type: 'MOVE_SNAKES' });
+      
+      // Batch all state updates
+      checkCollisions();
+      checkFruitConsumption();
+      checkPowerUps();
+      if (Math.random() < 0.02) spawnPowerUps();
+      
+      // Schedule next tick with fixed interval
+      gameTickTimeout = setTimeout(gameTick, tickInterval);
     };
-    loop();
-  }, [gameLoop]);
+    
+    // Render loop
+    const renderLoop = (timestamp: number) => {
+      // Only render at target FPS
+      if (timestamp - lastRenderTime >= frameInterval) {
+        draw(timestamp);
+        lastRenderTime = timestamp;
+      }
+      
+      animationFrameId.current = requestAnimationFrame(renderLoop);
+    };
+    
+    // Start both loops
+    gameTickTimeout = setTimeout(gameTick, tickInterval);
+    animationFrameId.current = requestAnimationFrame(renderLoop);
+    
+    // Cleanup
+    return () => {
+      if (gameTickTimeout) {
+        clearTimeout(gameTickTimeout);
+      }
+      if (animationFrameId.current) {
+        cancelAnimationFrame(animationFrameId.current);
+      }
+    };
+  }, [gameSpeed, draw, tickInterval]);
 
   return (
-    <div className="game-container">
-      <canvas ref={canvasRef} className="cyber-canvas" />
+    <div ref={containerRef} className="game-container" style={{ width: '100vw', height: '100vh', overflow: 'hidden' }}>
+      <canvas ref={canvasRef} className="cyber-canvas" style={{ width: '100%', height: '100%' }} />
       {gameOver && (
         <div className="cyber-overlay">
           <h2 className="glitch">GAME OVER</h2>
@@ -292,4 +468,4 @@ const GameBoard = ({ width, height, snakeCount, gameSpeed }: GameBoardProps) => 
   );
 };
 
-export default GameBoard; 
+export default React.memo(GameBoard); 

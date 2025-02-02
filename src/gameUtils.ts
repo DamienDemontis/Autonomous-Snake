@@ -1,10 +1,52 @@
 import { Position, Snake } from './types';
 import { CELL_SIZE, DIRECTIONS } from './constants';
 
-export const getRandomPosition = (width: number, height: number): Position => ({
-  x: Math.floor(Math.random() * width),
-  y: Math.floor(Math.random() * height),
-});
+// Cache for position strings to avoid repeated string creation
+const positionCache = new Map<string, string>();
+const getPositionKey = (x: number, y: number): string => {
+  const key = `${x},${y}`;
+  if (!positionCache.has(key)) {
+    positionCache.set(key, key);
+  }
+  return positionCache.get(key)!;
+};
+
+// Optimized random position generation that avoids snake bodies
+export const getRandomPosition = (width: number, height: number, snakes: Snake[]): Position => {
+  // Create a quick lookup set for snake body positions
+  const occupiedPositions = new Set<string>();
+  snakes.forEach(snake => {
+    snake.body.forEach(pos => {
+      occupiedPositions.add(getPositionKey(pos.x, pos.y));
+    });
+  });
+
+  let attempts = 0;
+  let position: Position;
+  
+  do {
+    position = {
+      x: Math.floor(Math.random() * width),
+      y: Math.floor(Math.random() * height)
+    };
+    attempts++;
+    // Prevent infinite loops
+    if (attempts > 100) {
+      // Find first available position if random fails
+      for (let x = 0; x < width; x++) {
+        for (let y = 0; y < height; y++) {
+          if (!occupiedPositions.has(getPositionKey(x, y))) {
+            return { x, y };
+          }
+        }
+      }
+      // If no position found, return a position anyway (edge case)
+      return position;
+    }
+  } while (occupiedPositions.has(getPositionKey(position.x, position.y)));
+
+  return position;
+};
 
 export const moveSnake = (snake: Snake, direction: Position, width: number, height: number): Snake => {
   const newHead = {
@@ -14,7 +56,7 @@ export const moveSnake = (snake: Snake, direction: Position, width: number, heig
 
   if (newHead.x < 0 || newHead.x >= width || newHead.y < 0 || newHead.y >= height) {
     console.log(`Snake ${snake.id} hit wall - respawning`);
-    return respawnSnake(snake, width, height);
+    return respawnSnake(snake, width, height, []);
   }
 
   return {
@@ -38,14 +80,22 @@ export const checkCollisions = (snakes: Snake[], width: number, height: number):
   });
 };
 
-export const findNearestFruit = (head: Position, fruits: Position[]): Position | null => {
-  if (fruits.length === 0) return null;
-  
-  return fruits.reduce((nearest, fruit) => {
-    const currentDist = Math.hypot(head.x - nearest.x, head.y - nearest.y);
-    const newDist = Math.hypot(head.x - fruit.x, head.y - fruit.y);
-    return newDist < currentDist ? fruit : nearest;
+// Add a maximum search distance to limit pathfinding calculations
+const MAX_SEARCH_DISTANCE = 20;
+
+export const findNearestFruit = (position: Position, fruits: Position[]): Position => {
+  let nearestFruit = fruits[0];
+  let minDistance = Number.MAX_VALUE;
+
+  fruits.forEach(fruit => {
+    const distance = Math.abs(fruit.x - position.x) + Math.abs(fruit.y - position.y);
+    if (distance < minDistance) {
+      minDistance = distance;
+      nearestFruit = fruit;
+    }
   });
+
+  return nearestFruit;
 };
 
 const posKey = (pos: Position) => `${pos.x},${pos.y}`;
@@ -55,103 +105,232 @@ function findPath(
   goal: Position,
   width: number,
   height: number,
-  obstacles: Set<string>
+  snakes: Snake[],
+  currentSnakeId: number
 ): Position[] | null {
-  const heuristic = (a: Position, b: Position) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
-  const openSet: Position[] = [start];
-  const cameFrom: { [key: string]: Position } = {};
-  const gScore: { [key: string]: number } = { [posKey(start)]: 0 };
-  const fScore: { [key: string]: number } = { [posKey(start)]: heuristic(start, goal) };
-
-  while (openSet.length > 0) {
-    let current = openSet.reduce((min, pos) => fScore[posKey(pos)] < fScore[posKey(min)] ? pos : min, openSet[0]);
+  const openSet = new Map<string, Position>();
+  const cameFrom = new Map<string, Position>();
+  const gScore = new Map<string, number>();
+  const fScore = new Map<string, number>();
+  
+  const posToString = (pos: Position) => `${pos.x},${pos.y}`;
+  const startKey = posToString(start);
+  
+  openSet.set(startKey, start);
+  gScore.set(startKey, 0);
+  fScore.set(startKey, manhattanDistance(start, goal));
+  
+  while (openSet.size > 0) {
+    const current = getLowestFScore(Array.from(openSet.values()), fScore, posToString);
+    const currentKey = posToString(current);
     
-    if (current.x === goal.x && current.y === goal.y) {
-      const path = [current];
-      while (cameFrom[posKey(current)]) {
-        current = cameFrom[posKey(current)];
-        path.unshift(current);
-      }
-      return path;
+    if (currentKey === posToString(goal)) {
+      return reconstructPath(cameFrom, current);
     }
-
-    openSet.splice(openSet.indexOf(current), 1);
+    
+    openSet.delete(currentKey);
     
     for (const dir of DIRECTIONS) {
-      const neighbor = { x: current.x + dir.x, y: current.y + dir.y };
-      if (neighbor.x < 0 || neighbor.x >= width || neighbor.y < 0 || neighbor.y >= height) continue;
-      if (obstacles.has(posKey(neighbor))) continue;
+      const neighbor = {
+        x: current.x + dir.x,
+        y: current.y + dir.y
+      };
+      
+      if (
+        neighbor.x < 0 || neighbor.x >= width ||
+        neighbor.y < 0 || neighbor.y >= height ||
+        checkCollision(neighbor, snakes, width, height, currentSnakeId)
+      ) {
+        continue;
+      }
+      
+      const neighborKey = posToString(neighbor);
+      const tentativeGScore = gScore.get(currentKey)! + 1;
+      
+      if (!gScore.has(neighborKey) || tentativeGScore < gScore.get(neighborKey)!) {
+        cameFrom.set(neighborKey, current);
+        gScore.set(neighborKey, tentativeGScore);
+        fScore.set(neighborKey, tentativeGScore + manhattanDistance(neighbor, goal));
+        openSet.set(neighborKey, neighbor);
+      }
+    }
+  }
+  
+  return null;
+}
 
-      const tentativeGScore = gScore[posKey(current)] + 1;
-      if (tentativeGScore < (gScore[posKey(neighbor)] ?? Infinity)) {
-        cameFrom[posKey(neighbor)] = current;
-        gScore[posKey(neighbor)] = tentativeGScore;
-        fScore[posKey(neighbor)] = tentativeGScore + heuristic(neighbor, goal);
-        if (!openSet.some(p => p.x === neighbor.x && p.y === neighbor.y)) {
-          openSet.push(neighbor);
+function manhattanDistance(a: Position, b: Position): number {
+  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+}
+
+function getLowestFScore(
+  positions: Position[],
+  fScore: Map<string, number>,
+  posToString: (pos: Position) => string
+): Position {
+  return positions.reduce((lowest, pos) => {
+    const score = fScore.get(posToString(pos)) ?? Infinity;
+    const lowestScore = fScore.get(posToString(lowest)) ?? Infinity;
+    return score < lowestScore ? pos : lowest;
+  });
+}
+
+function reconstructPath(cameFrom: Map<string, Position>, current: Position): Position[] {
+  const path = [current];
+  const posToString = (pos: Position) => `${pos.x},${pos.y}`;
+  let currentKey = posToString(current);
+  
+  while (cameFrom.has(currentKey)) {
+    current = cameFrom.get(currentKey)!;
+    currentKey = posToString(current);
+    path.unshift(current);
+  }
+  
+  return path;
+}
+
+// Add this helper function to predict potential collisions
+function predictHeadCollision(
+  myPos: Position,
+  myDirection: Position,
+  otherSnakeHeads: Position[],
+  width: number,
+  height: number
+): boolean {
+  const nextPos = {
+    x: myPos.x + myDirection.x,
+    y: myPos.y + myDirection.y
+  };
+
+  // Check if any other snake could move to our next position
+  return otherSnakeHeads.some(head => {
+    const distance = Math.abs(head.x - nextPos.x) + Math.abs(head.y - nextPos.y);
+    return distance <= 1; // If another snake head is adjacent to our next position
+  });
+}
+
+// Add this helper function to evaluate space around a position
+function evaluateSpace(
+  pos: Position,
+  snakes: Snake[],
+  width: number,
+  height: number,
+  currentSnakeId: number,
+  depth: number = 3
+): number {
+  if (depth === 0) return 0;
+  
+  let spaceScore = 0;
+  const visited = new Set<string>();
+  const queue: [Position, number][] = [[pos, depth]];
+  
+  while (queue.length > 0) {
+    const [current, currentDepth] = queue.shift()!;
+    const key = `${current.x},${current.y}`;
+    
+    if (visited.has(key)) continue;
+    visited.add(key);
+    
+    // Add score based on depth (further spaces worth less)
+    spaceScore += currentDepth;
+    
+    if (currentDepth > 0) {
+      for (const dir of DIRECTIONS) {
+        const next = { x: current.x + dir.x, y: current.y + dir.y };
+        if (next.x < 0 || next.x >= width || next.y < 0 || next.y >= height) continue;
+        if (!checkCollision(next, snakes, width, height, currentSnakeId)) {
+          queue.push([next, currentDepth - 1]);
         }
       }
     }
   }
-  return null;
+  
+  return spaceScore;
 }
 
 export const calculateBestDirection = (
-  head: Position,
-  target: Position | null,
+  current: Position,
+  target: Position,
   width: number,
   height: number,
   snakes: Snake[]
 ): Position => {
-  const obstacles = new Set<string>();
-  const currentSnake = snakes.find(s => s.body[0].x === head.x && s.body[0].y === head.y);
+  const currentSnake = snakes.find(s => 
+    s.body[0].x === current.x && s.body[0].y === current.y
+  );
+  const currentSnakeId = currentSnake?.id ?? -1;
   
-  // Collect all obstacles (other snake bodies and self body except head)
-  snakes.forEach(snake => {
-    snake.body.forEach((segment, index) => {
-      if (snake === currentSnake && index === 0) return;
-      obstacles.add(posKey(segment));
-    });
-  });
-
-  // Try to find path to fruit first
-  if (target) {
-    const path = findPath(head, target, width, height, obstacles);
-    if (path && path.length > 1) {
-      const nextStep = path[1];
-      return DIRECTIONS.find(d => 
-        d.x === (nextStep.x - head.x) && 
-        d.y === (nextStep.y - head.y)
-      ) || DIRECTIONS[0];
-    }
-  }
-
-  // Fallback to safe move selection
-  const safeMoves = DIRECTIONS.filter(dir => {
-    const newPos = { x: head.x + dir.x, y: head.y + dir.y };
-    return newPos.x >= 0 && newPos.x < width &&
-           newPos.y >= 0 && newPos.y < height &&
-           !obstacles.has(posKey(newPos));
-  });
-
-  if (safeMoves.length > 0) {
-    // Prefer moves with most open space
-    const scoredMoves = safeMoves.map(dir => {
-      const pos = { x: head.x + dir.x, y: head.y + dir.y };
-      const openSpace = DIRECTIONS.filter(d => {
-        const check = { x: pos.x + d.x, y: pos.y + d.y };
-        return check.x >= 0 && check.x < width &&
-               check.y >= 0 && check.y < height &&
-               !obstacles.has(posKey(check));
-      }).length;
-      return { dir, score: openSpace + Math.random() };
-    });
+  // Get other snake heads
+  const otherSnakeHeads = snakes
+    .filter(s => s.id !== currentSnakeId && s.alive)
+    .map(s => s.body[0]);
+  
+  // Calculate distance to target
+  const distance = Math.abs(target.x - current.x) + Math.abs(target.y - current.y);
+  
+  // Get all possible directions and score them
+  const scoredDirections = DIRECTIONS.map(dir => {
+    const newPos = { x: current.x + dir.x, y: current.y + dir.y };
     
-    return scoredMoves.reduce((best, curr) => curr.score > best.score ? curr : best).dir;
+    // Start with a base score
+    let score = 0;
+    
+    // Heavily penalize collisions
+    if (checkCollision(newPos, snakes, width, height, currentSnakeId)) {
+      return { dir, score: -1000 };
+    }
+    
+    // Penalize head-on collisions
+    if (predictHeadCollision(current, dir, otherSnakeHeads, width, height)) {
+      score -= 500;
+    }
+    
+    // Evaluate available space in the new position
+    const spaceScore = evaluateSpace(newPos, snakes, width, height, currentSnakeId);
+    score += spaceScore * 10;
+    
+    // Add score for moving towards target if not too dangerous
+    if (spaceScore > 5) {
+      const newDistance = Math.abs(target.x - newPos.x) + Math.abs(target.y - newPos.y);
+      if (newDistance < distance) {
+        score += 50;
+      }
+    }
+    
+    // Penalize moves that could trap the snake
+    if (currentSnake && wouldTrapSnake(current, dir, currentSnake, snakes, width, height)) {
+      score -= 300;
+    }
+    
+    // Bonus for moves that maintain distance from other snakes
+    const minDistanceToOthers = otherSnakeHeads.reduce((minDist, head) => {
+      const dist = Math.abs(newPos.x - head.x) + Math.abs(newPos.y - head.y);
+      return Math.min(minDist, dist);
+    }, Infinity);
+    score += minDistanceToOthers * 5;
+    
+    return { dir, score };
+  });
+  
+  // Sort directions by score and get the best one
+  const bestDirection = scoredDirections
+    .filter(({ score }) => score > -1000) // Filter out impossible moves
+    .sort((a, b) => b.score - a.score)[0];
+  
+  // If we found a valid direction, use it
+  if (bestDirection) {
+    return bestDirection.dir;
   }
-
-  // No safe moves, try to reverse as last resort
-  return currentSnake?.direction || DIRECTIONS[0];
+  
+  // Fallback to any safe direction if no good options found
+  const safeDirections = DIRECTIONS.filter(dir => {
+    const newPos = { x: current.x + dir.x, y: current.y + dir.y };
+    return !checkCollision(newPos, snakes, width, height, currentSnakeId);
+  });
+  
+  return safeDirections.length > 0 
+    ? safeDirections[Math.floor(Math.random() * safeDirections.length)]
+    : DIRECTIONS[Math.floor(Math.random() * DIRECTIONS.length)];
 };
 
 const collisionGrid = new Map<string, boolean>();
@@ -188,8 +367,106 @@ export const checkCollision = (
 // Call this at start of each frame
 export const resetCollisionGrid = () => collisionGrid.clear();
 
-export const respawnSnake = (snake: Snake, width: number, height: number): Snake => {
-  const newPosition = getRandomPosition(width, height);
+// Check if a move would trap the snake
+function wouldTrapSnake(
+  pos: Position,
+  direction: Position,
+  snake: Snake,
+  snakes: Snake[],
+  width: number,
+  height: number
+): boolean {
+  // Simulate the move
+  const newHead = { x: pos.x + direction.x, y: pos.y + direction.y };
+  const newBody = [newHead, ...snake.body.slice(0, -1)];
+  
+  // Quick check for immediate surroundings after move
+  let accessibleSpaces = 0;
+  const checked = new Set<string>();
+  const queue: Position[] = [newHead];
+  
+  while (queue.length > 0 && accessibleSpaces < 8) { // Only need to check a few spaces to know it's not trapped
+    const current = queue.shift()!;
+    const key = getPositionKey(current.x, current.y);
+    
+    if (checked.has(key)) continue;
+    checked.add(key);
+    
+    for (const dir of DIRECTIONS) {
+      const next = { x: current.x + dir.x, y: current.y + dir.y };
+      const nextKey = getPositionKey(next.x, next.y);
+      
+      if (next.x < 0 || next.x >= width || next.y < 0 || next.y >= height) continue;
+      if (checked.has(nextKey)) continue;
+      
+      // Check if position is occupied by any snake
+      let isOccupied = false;
+      for (const s of snakes) {
+        if (s.body.some(segment => segment.x === next.x && segment.y === next.y)) {
+          isOccupied = true;
+          break;
+        }
+      }
+      
+      if (!isOccupied) {
+        accessibleSpaces++;
+        queue.push(next);
+      }
+    }
+  }
+  
+  return accessibleSpaces < 3; // Consider trapped if less than 3 spaces accessible
+}
+
+// Optimize direction scoring with a cache
+const directionScoreCache = new Map<string, number>();
+
+function getDirectionScore(
+  pos: Position,
+  dir: Position,
+  snakes: Snake[],
+  width: number,
+  height: number,
+  currentSnakeId: number
+): number {
+  const cacheKey = `${pos.x},${pos.y},${dir.x},${dir.y},${currentSnakeId}`;
+  if (directionScoreCache.has(cacheKey)) {
+    return directionScoreCache.get(cacheKey)!;
+  }
+
+  const newPos = { x: pos.x + dir.x, y: pos.y + dir.y };
+  let score = 0;
+
+  // Check open spaces
+  for (const checkDir of DIRECTIONS) {
+    const checkPos = { 
+      x: newPos.x + checkDir.x, 
+      y: newPos.y + checkDir.y 
+    };
+    if (!checkCollision(checkPos, snakes, width, height, currentSnakeId)) {
+      score += 2;
+    }
+  }
+
+  // Penalize moves that could trap the snake
+  const currentSnake = snakes.find(s => s.id === currentSnakeId);
+  if (currentSnake && wouldTrapSnake(pos, dir, currentSnake, snakes, width, height)) {
+    score -= 10;
+  }
+
+  directionScoreCache.set(cacheKey, score);
+  return score;
+}
+
+// Clear caches periodically to prevent memory bloat
+export const clearCaches = () => {
+  if (positionCache.size > 1000) positionCache.clear();
+  if (directionScoreCache.size > 1000) directionScoreCache.clear();
+};
+
+// Update respawnSnake to use the new getRandomPosition
+export const respawnSnake = (snake: Snake, width: number, height: number, snakes: Snake[]): Snake => {
+  const newPosition = getRandomPosition(width, height, snakes);
   const validDirections = DIRECTIONS.filter(dir => {
     const newX = newPosition.x + dir.x;
     const newY = newPosition.y + dir.y;
@@ -201,6 +478,6 @@ export const respawnSnake = (snake: Snake, width: number, height: number): Snake
     body: [newPosition],
     direction: validDirections[Math.floor(Math.random() * validDirections.length)] || DIRECTIONS[0],
     alive: true,
-    score: Math.max(0, snake.score - 10), // Penalty for dying
+    score: Math.max(0, snake.score - 10),
   };
 }; 
